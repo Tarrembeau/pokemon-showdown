@@ -373,8 +373,8 @@ function getFlaggedRooms() {
 	return Object.keys(cache).filter(roomid => cache[roomid].staffNotified);
 }
 
-function saveSettings() {
-	FS('config/chat-plugins/nf.json').writeUpdate(() => JSON.stringify(settings));
+function saveSettings(isBackup = false) {
+	FS(`config/chat-plugins/nf${isBackup ? ".backup" : ""}.json`).writeUpdate(() => JSON.stringify(settings));
 }
 
 
@@ -720,6 +720,48 @@ export const commands: Chat.ChatCommands = {
 			this.privateGlobalModAction(`${user.name} disabled the abuse-monitor threshold increment.`);
 			this.globalModlog(`ABUSEMONITOR DISABLEINCREMENT`);
 		},
+		async failures(target) {
+			checkAccess(this);
+			if (!toID(target)) {
+				target = Chat.toTimestamp(new Date()).split(' ')[0];
+			}
+			const timeNum = new Date(target).getTime();
+			if (isNaN(timeNum)) {
+				return this.errorReply(`Invalid date.`);
+			}
+			let logs = await Chat.database.all(
+				'SELECT * FROM perspective_stats WHERE result = 0 AND timestamp > ? AND timestamp < ?',
+				[timeNum, timeNum + 24 * 60 * 60 * 1000]
+			);
+			logs = logs.filter(log => ( // proofing against node's stupid date lib
+				Chat.toTimestamp(new Date(log.timestamp)).split(' ')[0] === target
+			));
+			if (!logs.length) {
+				return this.errorReply(`No logs found for that date.`);
+			}
+			this.sendReplyBox(
+				`<strong>${Chat.count(logs, 'logs')}</strong> found on the date ${target}:<hr />` +
+				logs.map(f => `<a href="/${f.roomid}">${f.roomid}</a>`).join('<br />')
+			);
+		},
+		bs: 'backupsettings',
+		backupsettings(target, room, user) {
+			checkAccess(this);
+			saveSettings(true);
+			this.addGlobalModAction(`${user.name} used /abusemonitor backupsettings`);
+			this.refreshPage('abusemonitor-settings');
+		},
+		lb: 'loadbackup',
+		async loadbackup(target, room, user) {
+			checkAccess(this);
+			const backup = await FS('config/chat-plugins/nf.backup.json').readIfExists();
+			if (!backup) return this.errorReply(`No backup settings saved.`);
+			const backupSettings = JSON.parse(backup);
+			Object.assign(settings, backupSettings);
+			saveSettings();
+			this.addGlobalModAction(`${user.name} used /abusemonitor loadbackup`);
+			this.refreshPage('abusemonitor-settings');
+		},
 	},
 	abusemonitorhelp: [
 		`/am toggle - Toggle the abuse monitor on and off. Requires: whitelist &`,
@@ -838,7 +880,7 @@ export const pages: Chat.PageTable = {
 			buf += `</div></details>`;
 			buf += `<p><strong>Users:</strong><small> (click a name to punish)</small></p>`;
 			for (const [id] of Utils.sortBy([...users], ([, num]) => -num)) {
-				const curUser = Users.get(id);
+				const curUser = Users.getExact(id);
 				buf += Utils.html`<details class="readmore"><summary>${curUser?.name || id} `;
 				buf += `<button class="button" name="send" value="/mlid ${id},room=global">Modlog</button>`;
 				buf += `</summary><div class="infobox">`;
@@ -991,12 +1033,16 @@ export const pages: Chat.PageTable = {
 			buf += `</table></div>`;
 			return buf;
 		},
-		settings() {
+		async settings() {
 			checkAccess(this);
 			this.title = `[Abuse Monitor] Settings`;
 			let buf = `<div class="pad"><h2>Abuse Monitor Settings</h2>`;
-			buf += `<button class="button" name="send" value="/msgroom staff,/am respawn">Reload processes</button>`;
 			buf += `<button class="button" name="send" value="/am vs">Reload page</button>`;
+			buf += `<button class="button" name="send" value="/msgroom staff,/am respawn">Reload processes</button>`;
+			buf += `<button class="button" name="send" value="/msgroom staff,/am bs">Backup settings</button>`;
+			if (await FS('config/chat-plugins/nf.backup.json').exists()) {
+				buf += `<button class="button" name="send" value="/msgroom staff,/am lb">Load backup</button>`;
+			}
 			buf += `<div class="infobox"><h3>Miscellaneous settings</h3><hr />`;
 			buf += `Minimum percent to process: <form data-submitsend="/msgroom staff,/am editmin {num}">`;
 			buf += `<input name="num" value="${settings.minScore}"/>`;
